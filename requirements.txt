@@ -1,25 +1,40 @@
-# Core server
+#このプロジェクトに必要なライブラリのバージョンを明記し、誰が実行しても同じ環境にするためのファイル
+
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-starlette==0.38.6
 python-dotenv==1.0.1
-python-multipart==0.0.21
 websockets==12.0
-requests==2.31.0
 pydantic==2.9.2
+requests>=2.32.3
+starlette==0.38.6
+python-multipart==0.0.21
 
-# Audio / ML
-numpy==1.26.4
+# 音声処理（MVPでは一部をモック可能）
+webrtcvad==2.0.10
 librosa==0.10.2.post1
+# numpy - バージョンは他のパッケージの依存関係から自動決定
+
+# ASR（ローカルで手軽に動かすなら）
 faster-whisper==1.0.2
+
+# 日本語NLP（MVPは簡略可）
+sudachipy==0.6.8
+sudachidict_core==20240409
+
+# （将来）BERTopic等
+# bertopic==0.16.0
+# sentence-transformers==3.0.1
+
+# （将来）話者分離
 pyannote.audio==4.0.3
 huggingface_hub==1.2.3
+
+# 話者分離の埋め込み（pyannoteの依存）
 speechbrain==1.0.3
 torch==2.8.0
 
-# LLM client
+# LLM 質問生成
 openai==2.14.0
 
-# pyannote / lightning deps
 omegaconf==2.3.0
-hydra-core==1.3.2
+ruamel.yaml<0.18.0

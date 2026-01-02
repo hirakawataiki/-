@@ -224,7 +224,7 @@ class VoiceEngagementRuntime:
         )
 
         # 0.5 を中心に、上下を見やすく（k を上げると差が出やすい）
-        k = 2.5
+        k = 3.5
         x = self._clamp(k * x, -6.0, 6.0)
         score = 1.0 / (1.0 + math.exp(-x))
 
