@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.websockets import WebSocketDisconnect
+from typing import Set
 
 from src.pipeline.pipeline import ConversationPipeline
 from src.nlp.text_flow import run_text_flow, extract_topics
@@ -55,6 +56,10 @@ app.add_middleware(
 
 # WebSocket 用のメインパイプライン（UUDBリプレイなど）
 pipe = ConversationPipeline()
+ws_clients: Set[WebSocket] = set()
+cached_transcript: Dict[str, str] = {}
+cached_topics: List[dict] = []
+transcript_store: Dict[str, Dict[str, str]] = {}
 
 # 話者分離/埋め込みエンジン
 diarizer = DiarizationEngine()
@@ -69,8 +74,15 @@ SPEAKER_EMBEDDING_MATCH_THRESHOLD = float(os.getenv("SPEAKER_EMBEDDING_MATCH_THR
 # /audio_chunk 用の「オンライン音声盛り上がり度ランタイム」
 voice_runtime_api = VoiceEngagementRuntime(calib_utts=5)
 
-# /voice_features 用の「ブラウザ計算済み特徴量」ランタイム（リアル音声）
-voice_runtime_live = VoiceEngagementRuntime(calib_utts=6)
+# /voice_features 用の「ブラウザ計算済み特徴量」ランタイム（リアル音声）を話者ごとに持つ
+voice_runtime_live_map: Dict[str, VoiceEngagementRuntime] = {}
+
+
+def get_voice_runtime_live(speaker_id: str) -> VoiceEngagementRuntime:
+    sid = (speaker_id or "mix").strip() or "mix"
+    if sid not in voice_runtime_live_map:
+        voice_runtime_live_map[sid] = VoiceEngagementRuntime(calib_utts=6)
+    return voice_runtime_live_map[sid]
 
 
 async def _save_upload_to_path(file: UploadFile, raw_path: pathlib.Path, max_bytes: int) -> int:
@@ -255,7 +267,8 @@ async def voice_features(req: VoiceFeaturesRequest) -> dict:
         if req.voiced_ratio is not None:
             feats["voiced_ratio"] = float(req.voiced_ratio)
 
-        score, phase = voice_runtime_live.update(feats)
+        runtime = get_voice_runtime_live(req.speaker_id or "mix")
+        score, phase = runtime.update(feats)
 
         # タイムスタンプ決定（なければサーバ時刻）
         ts = float(req.timestamp) if req.timestamp is not None else time.time()
@@ -277,12 +290,12 @@ async def voice_features(req: VoiceFeaturesRequest) -> dict:
             pipe.push_live_score(ts=ts, score=float(score))
 
         baseline = {
-            "pitch_mu": voice_runtime_live.pitch_mu,
-            "energy_mu": voice_runtime_live.energy_mu,
-            "rate_mu": voice_runtime_live.rate_mu,
-            "pitch_mean_mu": getattr(voice_runtime_live, "pitch_mean_mu", None),
-            "energy_mean_mu": getattr(voice_runtime_live, "energy_mean_mu", None),
-            "voiced_mu": getattr(voice_runtime_live, "voiced_mu", None),
+            "pitch_mu": runtime.pitch_mu,
+            "energy_mu": runtime.energy_mu,
+            "rate_mu": runtime.rate_mu,
+            "pitch_mean_mu": getattr(runtime, "pitch_mean_mu", None),
+            "energy_mean_mu": getattr(runtime, "energy_mean_mu", None),
+            "voiced_mu": getattr(runtime, "voiced_mu", None),
         }
 
         pipe.record_voice_score(window_index=req.window_index, score=score)
@@ -893,7 +906,16 @@ async def ws_diarize(ws: WebSocket):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
+    ws_clients.add(ws)
     await ws.send_text("connected")
+    # 最新のテキスト/トピックを同期送信
+    try:
+        if cached_transcript:
+            await ws.send_json({"type": "transcript_broadcast", "payload": cached_transcript})
+        if cached_topics:
+            await ws.send_json({"type": "topics_broadcast", "payload": cached_topics})
+    except Exception:
+        pass
 
     try:
         while True:
@@ -903,8 +925,11 @@ async def ws_endpoint(ws: WebSocket):
                 print("connection closed (WebSocketDisconnect)")
                 break
 
-            if data == "PING":
-                await ws.send_text("PONG")
+            try:
+                if data == "PING":
+                    await ws.send_text("PONG")
+                    continue
+            except Exception:
                 continue
 
             mtype = data.get("type")
@@ -924,9 +949,50 @@ async def ws_endpoint(ws: WebSocket):
                         await ws.send_json({"type": "questions", "payload": payload})
                     except Exception:
                         traceback.print_exc()
+            elif mtype == "transcript_update":
+                try:
+                    payload = data.get("payload") or {}
+                    sid = (payload.get("speaker_id") or "mix").strip() or "mix"
+                    if sid not in transcript_store:
+                        transcript_store[sid] = {"final_text": "", "partial_text": ""}
+                    transcript_store[sid]["final_text"] = payload.get("final_text") or ""
+                    transcript_store[sid]["partial_text"] = payload.get("partial_text") or ""
+
+                    merged_final = " ".join(v.get("final_text", "") for v in transcript_store.values()).strip()
+                    merged_partial = " ".join(v.get("partial_text", "") for v in transcript_store.values()).strip()
+
+                    cached_transcript.clear()
+                    cached_transcript.update({
+                        "final_text": merged_final,
+                        "partial_text": merged_partial,
+                    })
+                    for c in list(ws_clients):
+                        try:
+                            await c.send_json({"type": "transcript_broadcast", "payload": cached_transcript})
+                        except Exception:
+                            continue
+                except Exception:
+                    traceback.print_exc()
+            elif mtype == "topics_update":
+                try:
+                    cached_topics.clear()
+                    cached_topics.extend(data.get("payload") or [])
+                    for c in list(ws_clients):
+                        try:
+                            if c is ws:
+                                continue
+                            await c.send_json({"type": "topics_broadcast", "payload": cached_topics})
+                        except Exception:
+                            continue
+                except Exception:
+                    traceback.print_exc()
 
     finally:
         try:
             await ws.close()
+        except Exception:
+            pass
+        try:
+            ws_clients.discard(ws)
         except Exception:
             pass

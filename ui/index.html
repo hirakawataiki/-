@@ -78,6 +78,23 @@
       <span class="pillDot ng" id="wsDot"></span>
       <span id="wsStatus">closed</span>
     </div>
+    <div class="pill">
+      <label for="hostToggle" class="small">認識ホスト</label>
+      <input type="checkbox" id="hostToggle" />
+    </div>
+    <div class="pill">
+      <label for="speakerSelect" class="small">話者</label>
+      <select id="speakerSelect">
+        <option value="SPK_01">SPK_01</option>
+        <option value="SPK_02">SPK_02</option>
+      </select>
+    </div>
+    <div class="pill">
+      <label for="micSelect" class="small">マイク</label>
+      <select id="micSelect">
+        <option value="">デフォルト</option>
+      </select>
+    </div>
   </div>
 
   <div class="card">
@@ -145,6 +162,9 @@
   const currentSpeakerEl = document.getElementById('currentSpeaker');
   const wsDot = document.getElementById('wsDot');
   const wsStatus = document.getElementById('wsStatus');
+  const hostToggle = document.getElementById('hostToggle');
+  const micSelect = document.getElementById('micSelect');
+  const speakerSelect = document.getElementById('speakerSelect');
 
   const btnConnect = document.getElementById('btnConnect');
   const btnStart = document.getElementById('btnStart');
@@ -236,6 +256,14 @@
         const data = JSON.parse(ev.data);
         if (data?.type === 'tick') {
           // デバッグ用途：必要ならここで表示
+        } else if (data?.type === 'transcript_broadcast') {
+          const t = data.payload || {};
+          finalText = (t.final_text || '').trim();
+          partialText = (t.partial_text || '').trim();
+          speechArea.value = (finalText + ' ' + partialText).trim();
+        } else if (data?.type === 'topics_broadcast') {
+          const topics = data.payload || [];
+          appendTopics(topics);
         }
       } catch {}
     };
@@ -246,6 +274,7 @@
   const topicStates = []; // {topic, scores[], avg, element}
   let lastResult = null;
   let lastVoiceScore = NaN;
+  let isHost = false;
 
   function clamp01(x) { return Math.max(0, Math.min(1, x)); }
   function lerp(a, b, t) { return a + (b - a) * t; }
@@ -470,39 +499,10 @@
     r.continuous = true;
     r.interimResults = true;
 
-    // Web Speech API の状態ログ（停止原因の切り分け用）
+    // Web Speech API の状態ログ（停止原因の切り分け用、再起動は手動にする）
     r.onstart       = () => { recognizing = true; log("speech recognition started"); };
-    r.onend         = () => {
-      recognizing = false;
-      log("speech recognition ended (onend fired)");
-      // 無操作で切れた場合は自動再開（停止ボタンを押していないとき）
-      if (!recognitionStopRequested) {
-        setTimeout(() => {
-          try {
-            r.start();
-            log("speech recognition restarted after onend");
-          } catch (err) {
-            log("speech restart failed: " + err);
-          }
-        }, 300);
-      }
-    };
-    r.onerror       = (e) => {
-      const err = (e?.error || 'unknown');
-      log("speech error: " + err);
-      // network/no-speech などで止まったら自動再開を試みる
-      if (!recognitionStopRequested) {
-        setTimeout(() => {
-          try { r.stop(); } catch {}
-          try {
-            r.start();
-            log("speech recognition restarted after error");
-          } catch (err2) {
-            log("speech restart failed: " + err2);
-          }
-        }, 300);
-      }
-    };
+    r.onend         = () => { recognizing = false; log("speech recognition ended (onend fired)"); };
+    r.onerror       = (e) => { log("speech error: " + (e?.error || 'unknown')); };
     r.onaudiostart  = () => log("audio capture start");
     r.onspeechend   = () => log("speech end detected");
 
@@ -519,8 +519,23 @@
       }
       partialText = interim;
       speechArea.value = (finalText + partialText).trim();
+      broadcastTranscript();
     };
     return r;
+  }
+
+  function broadcastTranscript() {
+    if (!isHost || !ws || ws.readyState !== 1) return;
+    try {
+      ws.send(JSON.stringify({
+        type: "transcript_update",
+        payload: {
+          final_text: finalText,
+          partial_text: partialText,
+          speaker_id: speakerSelect?.value || "mix",
+        }
+      }));
+    } catch {}
   }
 
   // ===== Topics incremental (差分 + 低頻度) =====
@@ -537,6 +552,7 @@
   }
 
   async function postTopicsIncrementalDelta(force=false) {
+    if (!isHost) return;
     const now = Date.now();
     if (!force && (now - lastTopicCallAt) < TOPIC_MIN_INTERVAL_MS) return;
 
@@ -566,6 +582,11 @@
       const topics = d.topics || d.result?.topics || [];
       appendTopics(topics);
       lastResult = d;
+      if (ws && ws.readyState === 1) {
+        try {
+          ws.send(JSON.stringify({ type: "topics_update", payload: topics }));
+        } catch {}
+      }
     } catch (e) {
       log(`topics_incremental error: ${e}`);
     }
@@ -583,6 +604,7 @@
   let pitchTrackHz = [];
 
   // ===== Diarization (MediaRecorder -> /ws_diarize) =====
+  const DIARIZE_ENABLED = false; // 軽量化のため無効化（必要なら true に）
   let wsDiarize = null;
   let diarizeRecorder = null;
   let diarizeOffsetSec = 0;
@@ -678,10 +700,11 @@
     return sec > 0 ? (peaks / sec) : 0;
   }
 
-  function startWebAudio() {
+  function startWebAudio(deviceId=null) {
     return new Promise(async (resolve, reject) => {
       try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const constraints = deviceId ? { audio: { deviceId } } : { audio: true };
+        micStream = await navigator.mediaDevices.getUserMedia(constraints);
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const src = audioCtx.createMediaStreamSource(micStream);
 
@@ -808,6 +831,10 @@
   }
 
   function startDiarize() {
+    if (!DIARIZE_ENABLED) {
+      logDiarize("[diarize] skipped (disabled)");
+      return;
+    }
     if (!micStream) {
       logDiarize("[diarize] mic stream not ready");
       return;
@@ -874,6 +901,7 @@
   }
 
   function stopDiarize() {
+    if (!DIARIZE_ENABLED) return;
     diarizeActive = false;
     if (diarizeRecorder && diarizeRecorder.state === 'recording') {
       diarizeRecorder.stop();
@@ -917,7 +945,10 @@
       const r = await fetch(API_BASE + '/voice_features', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          ...payload,
+          speaker_id: speakerSelect?.value || "mix",
+        })
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -931,15 +962,15 @@
       const phase = d.phase;
 
       if (phase === "calib") {
-        logVoice(`[voice] calib #${payload.window_index} score=null (pitch_mu=-- energy_mu=-- rate_mu=--)`);
-      } else {
-        logVoice(
-          `[voice] run #${payload.window_index} score=${safeNum(score, NaN).toFixed(3)} ` +
+      logVoice(`[voice] calib #${payload.window_index} speaker=${speakerSelect?.value || "mix"} score=null (pitch_mu=-- energy_mu=-- rate_mu=--)`);
+    } else {
+      logVoice(
+          `[voice] run #${payload.window_index} speaker=${speakerSelect?.value || "mix"} score=${safeNum(score, NaN).toFixed(3)} ` +
           `(pitch_mu=${safeNum(d?.baseline?.pitch_mu, 0)} ` +
           `energy_mu=${safeNum(d?.baseline?.energy_mu, 0)} ` +
           `rate_mu=${safeNum(d?.baseline?.rate_mu, 0)} ` +
           `voiced_mu=${safeNum(d?.baseline?.voiced_mu, NaN)})`
-        );
+      );
         if (isFinite(score)) lastVoiceScore = score;
         addScoreToCurrentTopic(score);
       }
@@ -954,10 +985,10 @@
     if (voiceTimer) return;
     voiceWindowIndex = 0;
     resetVoiceTracking();
-    logVoice("[voice] started (WebAudio -> /voice_features)");
+    logVoice(`[voice] started (WebAudio -> /voice_features) speaker=${speakerSelect?.value || "mix"}`);
 
     try {
-      await startWebAudio();
+      await startWebAudio(micSelect?.value || null);
     } catch (e) {
       logVoice("[voice] mic error: " + e);
       return;
@@ -988,7 +1019,9 @@
   btnConnect.onclick = () => wsConnect();
 
   btnStart.onclick = async () => {
-    // recognition
+    isHost = !!hostToggle?.checked; // ホストは話題抽出を担当
+
+    // 認識はホスト/非ホストどちらも許可（マイク別にテキスト送信）
     if (!recognition) recognition = setupRecognition();
     if (recognition && !recognizing) {
       recognitionStopRequested = false;
@@ -1003,16 +1036,17 @@
       document.getElementById('currentTopic').textContent = '（話題をクリックすると生成します）';
 
       recognition.start();
-      btnStart.disabled = true;
-      btnStop.disabled = false;
+    }
 
-      // voice features
-      await startVoice();
+    btnStart.disabled = true;
+    btnStop.disabled = false;
 
-      // topics polling（差分で、低頻度）
-      if (!topicsTimer) {
-        topicsTimer = setInterval(() => postTopicsIncrementalDelta(false), 1500);
-      }
+    // voice features（ホスト/非ホストとも実行可）
+    await startVoice();
+
+    // topics polling（ホストのみ）
+    if (isHost && !topicsTimer) {
+      topicsTimer = setInterval(() => postTopicsIncrementalDelta(false), 1500);
     }
   };
 
@@ -1029,6 +1063,20 @@
 
     if (topicsTimer) { clearInterval(topicsTimer); topicsTimer = null; }
   };
+
+  // マイク一覧を取得してセレクトに反映
+  if (navigator.mediaDevices?.enumerateDevices && micSelect) {
+    navigator.mediaDevices.enumerateDevices().then((list) => {
+      const audios = list.filter(d => d.kind === 'audioinput');
+      micSelect.innerHTML = '<option value=\"\">デフォルト</option>';
+      for (const d of audios) {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = d.label || `マイク (${d.deviceId.slice(0,6)})`;
+        micSelect.appendChild(opt);
+      }
+    }).catch(()=>{});
+  }
 
   // 初期状態
   setWsState(false);
