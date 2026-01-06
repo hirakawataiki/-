@@ -70,6 +70,9 @@
     .toggleBtn:focus { outline:none; }
     .collapseContent { display:block; }
     .collapseContent.is-collapsed { display:none; }
+    .drawerBtn { border:1px solid #d9dbe6; background:#fff; border-radius:10px; padding:8px 12px; display:inline-flex; align-items:center; gap:8px; box-shadow:0 1px 4px rgba(0,0,0,.08); cursor:pointer; }
+    .logDrawer { display:block; margin-top:10px; }
+    .logDrawer.is-collapsed { display:none; }
   </style>
 </head>
 <body>
@@ -112,6 +115,8 @@
     <div id="questions" style="margin-top:10px;"></div>
   </div>
 
+  <button class="drawerBtn" id="logsToggleBtn" aria-expanded="false">&#9776; ログ</button>
+  <div class="logDrawer is-collapsed" id="logsDrawer">
   <div class="card">
     <div class="toggleRow">
       <div style="font-weight:700;">話者分析（交代回数・現在話者）</div>
@@ -156,6 +161,7 @@
       <div class="log" id="log"></div>
     </div>
   </div>
+  </div>
 
 <script>
 (() => {
@@ -180,6 +186,8 @@
   const toggleVoiceBtn = document.getElementById('toggleVoiceBtn');
   const toggleDiarizeBtn = document.getElementById('toggleDiarizeBtn');
   const toggleLogBtn = document.getElementById('toggleLogBtn');
+  const logsToggleBtn = document.getElementById('logsToggleBtn');
+  const logsDrawer = document.getElementById('logsDrawer');
   const metricsSection = document.getElementById('metricsSection');
   const voiceSection = document.getElementById('voiceSection');
   const diarizeSection = document.getElementById('diarizeSection');
@@ -1069,6 +1077,13 @@
 
   // 初期状態
   setWsState(false);
+
+  if (logsToggleBtn && logsDrawer) {
+    logsToggleBtn.onclick = () => {
+      const collapsed = logsDrawer.classList.toggle('is-collapsed');
+      logsToggleBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    };
+  }
 
   function setupToggle(btn, section) {
     if (!btn || !section) return;
