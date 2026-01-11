@@ -369,6 +369,28 @@
     return String(t).trim();
   }
 
+  function formatScore(score) {
+    return isFinite(score) ? score.toFixed(3) : 'n/a';
+  }
+
+  function finalizeTopic(state, reason = 'switch') {
+    if (!state || state.finalized) return;
+    let finalScore = NaN;
+    if (state.scores.length) {
+      const sum = state.scores.reduce((a, c) => a + c, 0);
+      finalScore = sum / state.scores.length;
+    } else if (isFinite(state.avg)) {
+      finalScore = state.avg;
+    }
+    state.avg = finalScore;
+    state.finalScore = finalScore;
+    state.finalized = true;
+    const bg = getTopicColorFromScore(finalScore);
+    state.element.style.background = bg;
+    state.element.style.color = getReadableTextColor(bg);
+    log(`[topic] final topic="${state.topic}" avg=${formatScore(finalScore)} (${reason})`);
+  }
+
   function addTopicBadge(topic, scoreHint=null) {
     const box = document.getElementById('topics');
     const b = document.createElement('button');
@@ -384,6 +406,8 @@
       topic,
       scores: [],
       avg: (isFinite(scoreHint) ? scoreHint : NaN),
+      finalScore: NaN,
+      finalized: false,
       element: b,
     });
   }
@@ -400,6 +424,7 @@
     if (!topicStates.length) return;
 
     const state = topicStates[topicStates.length - 1];
+    if (state.finalized) return;
     state.scores.push(score);
     const sum = state.scores.reduce((a, c) => a + c, 0);
     state.avg = sum / state.scores.length;
@@ -431,6 +456,10 @@
     if (!selected) return;
     if (!isFinite(selectedScore) && isFinite(lastVoiceScore)) {
       selectedScore = lastVoiceScore;
+    }
+
+    if (topicStates.length) {
+      finalizeTopic(topicStates[topicStates.length - 1], 'switch');
     }
 
     seenTopics.add(selected);
@@ -1117,6 +1146,9 @@
 
     // 最後に残った差分を force で送る
     await postTopicsIncrementalDelta(true);
+    if (topicStates.length) {
+      finalizeTopic(topicStates[topicStates.length - 1], 'stop');
+    }
 
     if (topicsTimer) { clearInterval(topicsTimer); topicsTimer = null; }
   };
